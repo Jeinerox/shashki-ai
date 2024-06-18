@@ -2,6 +2,7 @@
 #include <pistache/http.h>
 #include <pistache/router.h>
 #include <regex>
+#include <chrono>
 #include "board.h"
 #include "game.h"
 #include "nlohmann/json.hpp"
@@ -118,11 +119,13 @@ void _v1_best(const Rest::Request& request, Http::ResponseWriter response) {
     print_board(bk, wt, vector<Move>());
 
     // run strategy
-    const clock_t& tic = clock();
+    auto start = std::chrono::high_resolution_clock::now();
     GameHistory history;
     GameStatus status = play_a_ply(bk, wt, blacks_turn, history, &strategy);
     vector<Move> moves(history.get_trajectory());
-    const double& cpu_time = double(clock() - tic) / CLOCKS_PER_SEC;
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    double cpu_time = elapsed.count();
 
     _clean_moves(moves);
 
