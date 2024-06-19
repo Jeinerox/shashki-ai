@@ -4,6 +4,8 @@
 #include "shared.h"
 #include "strategies.h"
 #include "valuation.h"
+#include <mutex>
+#include <future>
 
 using namespace std;
 using json = nlohmann::json;
@@ -11,11 +13,13 @@ using json = nlohmann::json;
 namespace shashki {
 
 // count number of value function evals
-static thread_local uint_fast64_t n_evals;
+static uint_fast64_t n_evals;
 
 // stores the top level move-value pairs, useful to explain the choice or do
 // soft move selection
-static thread_local vector<pair<Move, int>> _root_moves;
+static vector<pair<Move, int>> _root_moves;
+
+std::mutex mtx;
 
 void _get_capture_endpoints_helper(const Slice& bk, const Slice& wt,
                                    const Loc& from,
@@ -68,14 +72,15 @@ static int _negamax_ab(const Slice& bk, const Slice& wt,
     moves = valid_capturing_moves_from(bk, wt, capture_from);
 
   if (remaining_depth == 0 || moves.empty()) {
+    std::lock_guard<std::mutex> lock(mtx);
     ++n_evals;
     return color * value_estim(bk, wt, blacks_turn, cur_depth);
   }
 
   int value = -2050505050;
-  for (int i = 0; i < (int)moves.size(); ++i) {
-    const Move& mv = moves[i];
 
+  auto _search_move = [&](int i) -> pair<int, Move> {
+    const Move& mv = moves[i];
     // execute the move
     Slice _bk(bk), _wt(wt);
     const bool capture = do_move(_bk, _wt, mv);
@@ -98,19 +103,44 @@ static int _negamax_ab(const Slice& bk, const Slice& wt,
       val = max(val, v);
     }
 
-    if (cur_depth == 0) _root_moves.push_back(make_pair(mv, val));
+    if (cur_depth == 0){
+      std::lock_guard<std::mutex> lock(mtx);
+      _root_moves.push_back(make_pair(mv, val));
+    }
 
-    if (val > value) {
+    return make_pair(val, mv);
+  };
+
+  if (cur_depth == 0){
+    std::vector<std::future<pair<int, Move>>> threads;
+      for (int i = 0; i < (int)moves.size(); ++i) {
+        threads.emplace_back(std::async(std::launch::async, _search_move, i)); 
+      }
+
+      for (auto &&thread : threads) {
+        if (auto [val, mv] = thread.get() ; val > value){
+          value = val;
+          best_move = mv;
+        } 
+      }
+      return value;  
+  }
+  
+
+  for (int i = 0; i < (int)moves.size(); ++i) {
+    auto [val, mv] = _search_move(i);
+
+    if (val > value){
       value = val;
       if (cur_depth == 0) best_move = mv;
     }
 
     alpha = max(alpha, value);
-    if (alpha >= beta) {
+    if (alpha >= beta){
       break;
     }
   }
-
+  
   return value;
 }
 
@@ -263,7 +293,6 @@ Move negamax_ab_strategy(const Slice& bk, const Slice& wt,
 
   printf("> evaluated %lu positions for player %s\n", n_evals,
          blacks_turn ? "black" : "white");
-
   const bool soft_select = false;
   if (soft_select && !_root_moves.empty()) {
     vector<int> scores;
